@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>TradeOps Pro</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         body { background-color: #0e1117; color: #e5e7eb; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         .btn-call { background: linear-gradient(to bottom, #26a69a, #208e82); box-shadow: 0 4px 0 #15685e; }
@@ -13,6 +13,12 @@
         .btn-put { background: linear-gradient(to bottom, #ef5350, #d32f2f); box-shadow: 0 4px 0 #b71c1c; }
         .btn-put:active { transform: translateY(4px); box-shadow: none; }
         .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.1); }
+        .switch { position: relative; display: inline-block; width: 34px; height: 20px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #374151; transition: .4s; border-radius: 34px; }
+        .slider:before { position: absolute; content: ""; height: 12px; width: 12px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: #26a69a; }
+        input:checked + .slider:before { transform: translateX(14px); }
     </style>
 </head>
 <body class="h-screen flex flex-col overflow-hidden select-none">
@@ -24,6 +30,15 @@
             <div class="flex items-center gap-1 text-white font-bold text-sm">
                 EUR/USD <span class="text-green-400 text-[10px]">82%</span>
             </div>
+        </div>
+        
+        <!-- AUTO BOT TOGGLE -->
+        <div class="flex items-center gap-2">
+            <label class="switch">
+                <input type="checkbox" id="auto-toggle" onchange="toggleAuto()">
+                <span class="slider"></span>
+            </label>
+            <span class="text-[10px] font-bold text-gray-400 uppercase">Auto Pilot</span>
         </div>
         
         <div class="flex flex-col items-end" onclick="confirmReset()">
@@ -41,16 +56,22 @@
     </div>
 
     <!-- Active Trade Panel (Slide Up) -->
-    <div id="trade-panel" class="hidden absolute bottom-24 left-4 right-4 glass rounded-xl p-3 z-30 transition-all duration-300">
-        <div class="flex justify-between items-center mb-2">
-            <span class="text-xs text-gray-400 font-bold" id="trade-type">CALL</span>
-            <span class="text-xs text-white font-mono" id="trade-entry">@ 1.2000</span>
+    <div id="trade-panel" class="hidden absolute bottom-24 left-4 right-4 z-30 transition-all duration-300 space-y-2">
+        <!-- Summary -->
+        <div class="glass rounded-xl p-3 flex justify-between items-center cursor-pointer" onclick="toggleDetails()">
+            <div class="flex flex-col">
+                <span class="text-xs text-gray-400 font-bold tracking-widest">OPEN TRADES</span>
+                <span class="text-white font-bold text-sm" id="trade-count">0 Positions</span>
+            </div>
+            <div class="flex flex-col items-end">
+                <span class="text-xs text-gray-400 font-bold tracking-widest">NET PNL</span>
+                <div class="text-xl font-bold font-mono" id="trade-pnl">$0.00</div>
+            </div>
         </div>
-        <div class="flex justify-between items-end">
-            <div class="text-2xl font-bold font-mono" id="trade-pnl">$0.00</div>
-            <button onclick="closeTrade()" class="bg-gray-700 hover:bg-gray-600 text-white text-[10px] px-3 py-1.5 rounded font-bold uppercase tracking-wider">
-                Close
-            </button>
+        
+        <!-- Detailed List (Hidden by default) -->
+        <div id="trade-list" class="hidden bg-gray-900/90 backdrop-blur rounded-xl p-2 max-h-48 overflow-y-auto border border-gray-700">
+            <!-- Rows injected here -->
         </div>
     </div>
 
@@ -92,32 +113,60 @@
         async function sync() {
             try {
                 const res = await fetch('/api/tick');
+                if (!res.ok) throw new Error("API Error");
                 const data = await res.json();
                 render(data);
-            } catch(e) {}
+                document.getElementById('live-price').style.borderColor = 'rgba(34,197,94,0.5)'; // Green border on sync
+            } catch(e) {
+                console.error(e);
+                document.getElementById('live-price').style.borderColor = 'rgba(239,68,68,0.5)'; // Red border on fail
+                document.getElementById('live-price').innerText = "CONNECTING...";
+            }
+        }
+
+        function toggleDetails() {
+            document.getElementById('trade-list').classList.toggle('hidden');
         }
 
         function render(data) {
-            // Update Price
+            // Update Price & Balance
             const time = Math.floor(data.timestamp / 1000);
-            lineSeries.update({ time: time, value: data.price });
-            document.getElementById('live-price').innerText = data.price.toFixed(5);
+            const price = parseFloat(data.price.toFixed(5));
+            lineSeries.update({ time: time, value: price });
+            document.getElementById('live-price').innerText = price.toFixed(5);
+            document.getElementById('balance').innerText = '$' + data.account.balance.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+            document.getElementById('auto-toggle').checked = data.account.autoMode;
 
-            // Update Balance
-            document.getElementById('balance').innerText = '$' + data.account.equity.toFixed(2);
-
-            // Update Active Trade
+            // Handle Multi-Trades
+            // Engine guarantees activeTrades array
+            const trades = data.account.activeTrades || [];
             const panel = document.getElementById('trade-panel');
-            if (data.account.activeTrade) {
+            
+            if (trades.length > 0) {
                 panel.classList.remove('hidden');
-                const t = data.account.activeTrade;
-                document.getElementById('trade-type').innerText = t.type;
-                document.getElementById('trade-type').className = `text-xs font-bold ${t.type === 'CALL' ? 'text-green-400' : 'text-red-400'}`;
-                document.getElementById('trade-entry').innerText = '@ ' + t.entry.toFixed(5);
+                document.getElementById('trade-count').innerText = `${trades.length} Active`;
                 
+                const netPnL = trades.reduce((sum, t) => sum + t.pnl, 0);
                 const pnlEl = document.getElementById('trade-pnl');
-                pnlEl.innerText = (t.pnl >= 0 ? '+' : '') + '$' + t.pnl.toFixed(2);
-                pnlEl.className = `text-2xl font-bold font-mono ${t.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`;
+                pnlEl.innerText = (netPnL >= 0 ? '+' : '') + '$' + netPnL.toFixed(2);
+                pnlEl.className = `text-xl font-bold font-mono ${netPnL >= 0 ? 'text-green-400' : 'text-red-400'}`;
+
+                // Render List
+                const list = document.getElementById('trade-list');
+                list.innerHTML = trades.map(t => `
+                    <div class="flex justify-between items-center py-2 border-b border-gray-700 last:border-0">
+                        <div class="flex flex-col">
+                            <span class="text-[10px] font-bold ${t.type === 'CALL' ? 'text-green-400' : 'text-red-400'}">${t.type}</span>
+                            <span class="text-[10px] text-gray-500">@ ${parseFloat(t.entry).toFixed(5)}</span>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span class="text-sm font-mono font-bold ${t.pnl >= 0 ? 'text-green-400' : 'text-red-400'}">
+                                ${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}
+                            </span>
+                            <button onclick="closeTrade('${t.id}')" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-white">X</button>
+                        </div>
+                    </div>
+                `).join('');
             } else {
                 panel.classList.add('hidden');
             }
@@ -130,14 +179,23 @@
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ action: 'OPEN', type, amount: amt })
             });
-            sync(); // Instant update
+            sync();
         }
 
-        async function closeTrade() {
+        async function closeTrade(id) {
             await fetch('/api/trade', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ action: 'CLOSE' })
+                body: JSON.stringify({ action: 'CLOSE', tradeId: id })
+            });
+            sync();
+        }
+        
+        async function toggleAuto() {
+            await fetch('/api/trade', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ action: 'TOGGLE_AUTO' })
             });
             sync();
         }
@@ -154,7 +212,6 @@
         }
 
         // Init history loop locally to fill chart fast
-        // In real app, we fetch history. Here we simulate pre-fill.
         let t = Math.floor(Date.now() / 1000) - 300;
         let p = 1.1000;
         for(let i=0; i<300; i++) {
@@ -163,7 +220,7 @@
             lineSeries.update({ time: t, value: p });
         }
 
-        setInterval(sync, 1000);
+        setInterval(sync, 500);
         sync();
         
         // Auto-resize
